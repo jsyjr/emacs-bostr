@@ -254,7 +254,7 @@
 ;;
 ;; * find-revision (file rev buffer)
 ;;
-;;   Fetch revision REV of file FILE and put it into BUFFER.
+;;   Fetch revision REV of file FILE and put it into empty BUFFER.
 ;;   If REV is the empty string, fetch the head of the trunk.
 ;;   The implementation should pass the value of vc-checkout-switches
 ;;   to the backend command.
@@ -677,6 +677,9 @@
 
 
 ;;; Todo:
+;;
+;; - other caching considerations: backend? remote?
+
 
 ;;;; New Primitives:
 ;;
@@ -909,10 +912,22 @@ is sensitive to blank lines."
 		       (string :tag "Comment Start")
 		       (string :tag "Comment End"))))
 
-(defcustom vc-find-revision-no-save nil
-  "If non-nil, `vc-find-revision' doesn't write the created buffer to file."
+(defcustom vc-find-revision-no-save t
+  "When nil, `vc-find-revision' caches a local copy of returned revision.
+See `vc-mirror-root' for a description of where the cached copy gets saved.
+
+Starting in version 30.1 this option's default changed from nil to t."
   :type 'boolean
   :version "27.1")
+
+(defcustom vc-mirror-root nil
+  "If non-nil, the root of a tree of cached revisions (no trailing '/').
+
+When `vc-find-revision-no-save' is nil, if `vc-mirror-root' is nil then
+cached revisions will be siblings of working files, otherwise cached
+revisions will be saved to mirror filenames beneath `vc-mirror-root'."
+  :type 'string
+  :version "30.1")
 
 ;; The default is nil because only a VC user who also possesses a lot of
 ;; knowledge specific to the VCS in use can know when it is okay to
@@ -2389,97 +2404,156 @@ If `F.~REV~' already exists, use it instead of checking it out again."
 		     rev)))
     (switch-to-buffer-other-window (vc-find-revision file revision))))
 
-(defun vc-find-revision (file revision &optional backend)
-  "Read REVISION of FILE into a buffer and return the buffer.
-Use BACKEND as the VC backend if specified."
-  (if vc-find-revision-no-save
-      (vc-find-revision-no-save file revision backend)
-    (vc-find-revision-save file revision backend)))
 
-(defun vc-find-revision-save (file revision &optional backend)
-  "Read REVISION of FILE into a buffer and return the buffer.
-Saves the buffer to the file."
-  (let ((automatic-backup (vc-version-backup-file-name file revision))
-	(filebuf (or (get-file-buffer file) (current-buffer)))
-        (filename (vc-version-backup-file-name file revision 'manual)))
-    (unless (file-exists-p filename)
-      (if (file-exists-p automatic-backup)
-          (rename-file automatic-backup filename nil)
-	(message "Checking out %s..." filename)
-	(with-current-buffer filebuf
-	  (let ((failed t))
-	    (unwind-protect
-		(let ((coding-system-for-read 'no-conversion))
-		  (with-temp-file filename
-		    (let ((outbuf (current-buffer)))
-                      ;; We will read the backend's output with no
-                      ;; conversions, so we should also save the
-                      ;; temporary file with no encoding conversions.
-                      (setq buffer-file-coding-system 'no-conversion)
-		      ;; Change buffer to get local value of
-		      ;; vc-checkout-switches.
-		      (with-current-buffer filebuf
-			(if backend
-			    (vc-call-backend backend 'find-revision file revision outbuf)
-			  (vc-call find-revision file revision outbuf)))))
-		  (setq failed nil))
-	      (when (and failed (file-exists-p filename))
-		(delete-file filename))))
-	  (vc-mode-line file))
-	(message "Checking out %s...done" filename)))
-    (let ((result-buf (find-file-noselect filename)))
-      (with-current-buffer result-buf
-	;; Set the parent buffer so that things like
-	;; C-x v g, C-x v l, ... etc work.
-        (setq-local vc-parent-buffer filebuf))
-      result-buf)))
+(defun vc--cache-this-file (_file  &optional _backend)
+  "Return non-nil if FILE should be cached.
 
-(defun vc-find-revision-no-save (file revision &optional backend buffer)
-  "Read REVISION of FILE into BUFFER and return the buffer.
-If BUFFER omitted or nil, this function creates a new buffer and sets
-`buffer-file-name' to the name constructed from the file name and the
-revision number.
-Unlike `vc-find-revision-save', doesn't save the buffer to the file."
-  (let* ((buffer (when (buffer-live-p buffer) buffer))
-         (filebuf (or buffer (get-file-buffer file) (current-buffer)))
-         (filename (unless buffer (vc-version-backup-file-name file revision 'manual))))
-    (unless (and (not buffer)
-                 (or (get-file-buffer filename)
-                     (file-exists-p filename)))
-      (with-current-buffer filebuf
-	(let ((failed t))
-	  (unwind-protect
-	      (with-current-buffer (or buffer (create-file-buffer filename))
-                (unless buffer (setq buffer-file-name filename))
-		(let ((outbuf (current-buffer)))
-		  (with-current-buffer filebuf
-		    (if backend
-			(vc-call-backend backend 'find-revision file revision outbuf)
-		      (vc-call find-revision file revision outbuf))))
-                (decode-coding-inserted-region (point-min) (point-max) file)
-                (after-insert-file-set-coding (- (point-max) (point-min)))
-                (goto-char (point-min))
-                (if buffer
-                    ;; For non-interactive, skip any questions
-                    (let ((enable-local-variables :safe) ;; to find `mode:'
-                          (buffer-file-name file))
-                      ;; Don't run hooks that might assume buffer-file-name
-                      ;; really associates buffer with a file (bug#39190).
-                      (ignore-errors (delay-mode-hooks (set-auto-mode))))
-                  (normal-mode))
-	        (set-buffer-modified-p nil)
-                (setq buffer-read-only t)
-                (setq failed nil))
-	    (when (and failed (unless buffer (get-file-buffer filename)))
-	      (with-current-buffer (get-file-buffer filename)
-		(set-buffer-modified-p nil))
-	      (kill-buffer (get-file-buffer filename)))))))
-    (let ((result-buf (or buffer
-                          (get-file-buffer filename)
-                          (find-file-noselect filename))))
-      (with-current-buffer result-buf
-        (setq-local vc-parent-buffer filebuf))
-      result-buf)))
+TODO: backend should participate in this predicate."
+  (not vc-find-revision-no-save))
+
+(defvar-local vc--revbuf-revision nil
+  "Remember a revision buffer's VCS-specific unique revision." )
+(put 'vc--revbuf-revision 'permanent-local t)
+
+;; Before the advent of vc-timemachine, the behavior of `vc-find-revision'
+;; was implied indirectly in the emacs manual as always caching a copy
+;; of the returned revision.  `vc-revision-other-window's write-up was:
+;;
+;;   This retrieves the file version corresponding to revision, saves it
+;;   to filename.~revision~, and visits it in a separate window.
+;;
+;; But if revisions are immutable history, then there is no reason for
+;; a revision buffer to visit a mutable file.  Saving a file could be
+;; justified as a form of caching.  But, if a cache is to be trusted,
+;; it must not be possible for a user to corrupt its contents.
+;;
+;; As of release 30.1 revision buffer are returned with buffer-file-name
+;; set to nil, signifying that revision buffers do not visit files.
+;;
+;; Whether to cache or not is controlled by `vc-find-revision-no-save'.
+;;
+;; Caching revisions as siblings of a working file is often seen as
+;; "cluttering" the workspace.  `vc-mirror-root' provides a alternative,
+;; a mirror directory structure where revisions are cached.
+
+(defun vc-find-revision (file revision &optional optbackend buffer)
+  "Read REVISION of FILE into a buffer and return that buffer as read-only.
+Contruct the filename of a potential cached copy from `vc-mirror-root',
+FILE and REVISION.  If that file exists and is writable then rewrite it
+to ensure that it accurately reflects the retrieved revision.  Otherwise,
+if `vc-find-revision-no-save' is nil, save buffer to its cache location.
+When BUFFER is absent or dead, create a new buffer; otherwise repurpose
+the supplied BUFFER by erasing its contents, setting its name and updating
+its mode.  In all cases buffer-file-name is set to nil, ensuring that the
+returned buffer does not appear to be visiting any file (in particular no
+file beneath `vc-mirror-root')."
+  (let* ((backend (or optbackend (vc-backend file)))
+         (buffer (when (buffer-live-p buffer) buffer))
+         (parent (or buffer (get-file-buffer file) (current-buffer)))
+         (revd-file (vc-version-backup-file-name file revision 'manual))
+         (true-dir (file-name-directory file))
+         (true-name (file-name-nondirectory file))
+         (revd-name (file-name-nondirectory revd-file))
+         ;; Use concat becasue true-dir and revd-file are already absolute.
+         ;; Here each is being mirrored beneath vc-mirror-root.
+         (save-dir (concat vc-mirror-root true-dir))
+         (save-file (concat vc-mirror-root revd-file))
+         ;; Some hooks assume that buffer-file-name associates a buffer with
+         ;; a true file.  This mapping is widely assumed to be one-to-one.
+         ;; To avoid running afoul of that assumption this fictitious filename
+         ;; is expected to be unique (bug#39190).  This filename also has the
+         ;; virtue that it exhibits the same file type (extension) as FILE.
+         ;; This improves the choosing and setting the buffer's modes as it
+         ;; allows running run-mode-hooks instead of delay-mode-hooks.
+         (pretend (concat true-dir "PRETEND/" true-name))
+         (revbuf (or buffer
+                     (get-file-buffer save-file)
+                     (get-buffer-create revd-name)))
+         (failed t))
+
+    (unless backend
+      (error "File '%s' is not under version control" file))
+
+    (with-current-buffer revbuf
+      (unwind-protect
+          (progn
+            ;; Prep revbuf in case it is being reused.
+            (setq buffer-file-name nil) ; Cancel any prior file visitation
+            ;; non-nil vc-parent-buffer enables C-x v g, C-x v l, ... etc.
+            (setq vc-parent-buffer parent)
+            (setq vc--revbuf-revision revision)
+            (setq buffer-read-only nil)
+            (buffer-disable-undo)
+            (erase-buffer)
+
+            (message "Fetching %s..." revd-file)
+            ;; Do not trust an existing file to be an intact cached copy
+            ;; of the desired revision unless it is read-only.  This is
+            ;; because, in spite of having the desired filename, it may
+            ;; have been corrupted subsequent to its creation.  Since this
+            ;; function creates cached copies as read-only, some other agent
+            ;; would have had to have change the permissions and, most
+            ;; likely, changed the file's contents as well.
+            (if (and (vc--cache-this-file file backend)
+                     (file-exists-p save-file)
+                     (not (file-writable-p save-file)))
+                ;; Mirror file reads and writes both use no-conversion
+                (let ((coding-system-for-read 'no-conversion))
+                  (insert-file-contents save-file t))
+              ;; No viable cached-copy so obtain revision from a backend
+              (vc-call-backend backend 'find-revision file revision revbuf))
+
+            (vc-mode-line file backend)
+            (message "Fetching %s...done" revd-file)
+
+            ;; Cache revision per the user's desires
+            (when (or (if (file-exists-p save-file)
+                          (file-writable-p save-file)
+                        (vc--cache-this-file file backend)))
+              (make-directory save-dir t)
+              (vc--safe-delete-file save-file)
+              ;; Mirror file reads and writes both use no-conversion
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region nil nil save-file))
+              ;; Attempt to avert the most obvious means of corrupting a cached
+              ;; revision.  Only protects against cockpit error.  A determined
+              ;; attacker can circumvent this obstacle.
+              (set-file-modes save-file (logand (file-modes save-file) #o7555)))
+
+            ;; Buffer contents is precisely the result of retrieving a revision
+            ;; from a vc backend.  This is true even for cached revisions since
+            ;; all cache reads and writes are done with 'no-conversion.
+            (decode-coding-inserted-region (point-min) (point-max) file)
+            (after-insert-file-set-coding (- (point-max) (point-min)))
+
+            ;; Setup revbuf's modes based on it contents and pretend file name.
+            (let ((enable-local-variables :safe)
+                  (buffer-file-name pretend)) ;; to find `mode:'
+              (when (file-exists-p pretend)
+                (error "PRETEND file actually exists"))
+              (ignore-errors (run-mode-hooks (set-auto-mode)))
+              ;; Remove pretend in case some hook function just created it
+              (vc--safe-delete-file pretend))
+
+            ;; Indicate succesful negotiation of the obstacle course.
+            (setq failed nil)))
+
+      (when failed
+        (vc--safe-delete-file save-file)
+        (vc--safe-delete-file pretend)
+        (erase-buffer))
+
+      ;; Setup final revbuf configuration.
+      (goto-char (point-min))
+      (set-buffer-modified-p nil)
+      (setq buffer-read-only t)
+      revbuf)))
+
+(defun vc--safe-delete-file (file)
+  "If FILE exists delete it, even if its permissions say that it is readonly."
+  (when (file-exists-p file)
+    (set-file-modes file (logior (file-modes file) #o222))
+    (delete-file file)))
 
 ;; Header-insertion code
 
