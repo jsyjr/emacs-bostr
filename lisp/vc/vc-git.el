@@ -83,6 +83,9 @@
 ;; - annotate-time ()                              OK
 ;; - annotate-current-time ()                      NOT NEEDED
 ;; - annotate-extract-revision-at-line ()          OK
+;; TIMEMACHINE
+;; * tm-revisions (file)
+;; * tm-map-line-no (file from-revision from-line to-revision from-is-older)
 ;; TAG/BRANCH SYSTEM
 ;; - create-tag (dir name branchp)                 OK
 ;; - retrieve-tag (dir name update)                OK
@@ -103,6 +106,8 @@
 
 (require 'cl-lib)
 (require 'vc-dispatcher)
+(require 'transient)
+(require 'vc-timemachine)
 (eval-when-compile
   (require 'subr-x) ; for string-trim-right
   (require 'vc)
@@ -182,6 +187,11 @@ clear the staging area."
   "Name of the Git executable (excluding any arguments)."
   :version "24.1"
   :type 'string)
+
+(defcustom vc-git-global-git-process-file-arguments
+  '("-c" "log.showSignature=false" "--no-pager")
+  "Common arguments for all invocations of `vc-git--process-file'."
+  :type 'list)
 
 (defcustom vc-git-root-log-format
   '("%d%h..: %an %ad %s"
@@ -1269,6 +1279,8 @@ It is based on `log-edit-mode', and has Git-specific extensions."
           (vc-git-command nil 0 files "reset" "--"))))))
 
 (defun vc-git-find-revision (file rev buffer)
+  "Insert FILE REV (aka commit) into BUFFER.
+Any git cat-file error leaves initially empty BUFFER unchanged."
   (let* (process-file-side-effects
 	 (coding-system-for-read 'binary)
 	 (coding-system-for-write 'binary)
@@ -1280,10 +1292,13 @@ It is based on `log-edit-mode', and has Git-specific extensions."
 	    (if (string= fn "")
 		(file-relative-name file (vc-git-root default-directory))
 	      (substring fn 0 -1)))))
-    (vc-git-command
-     buffer 0
-     nil
-     "cat-file" "blob" (concat (if rev rev "HEAD") ":" fullname))))
+    ;; Wrap "git cat-file blob" in an ignore-errors to improve robustness.
+    ;; An encountered failure mode is choosing a commit older than the file.
+    (ignore-errors
+      (vc-git-command
+       buffer 0
+       nil
+       "cat-file" "blob" (concat (if rev rev "HEAD") ":" fullname)))))
 
 (defun vc-git-find-ignore-file (file)
   "Return the git ignore file that controls FILE."
@@ -1876,6 +1891,84 @@ This requires git 1.8.4 or later, for the \"-L\" option of \"git log\"."
   (let ((default-directory dir))
     (vc-git-command nil 0 nil "checkout" name)))
 
+
+;;; TIMEMACHINE
+(defun vc-git--process-file (&rest args)
+  "Run `process-file' with ARGS and `vc-git-global-git-process-file-arguments'."
+  (apply #'process-file vc-git-program nil t nil
+         (append vc-git-global-git-process-file-arguments args)))
+
+(defun vc-git-tm-revisions (file)
+  "Return data about revisions modifying FILE on checked-out branch."
+  (let* ((default-directory (vc-git-root file))
+         (rel-file (file-relative-name file))
+         (revision-infos))
+    (unless (zerop (vc-git--process-file
+                    "log" "--pretty=format:%H%x00%aI%x00%s%x00%an"
+                    "--name-only" "--follow" "--" rel-file))
+      (error "Git log error: .git= '%s', file= '%s'"
+             default-directory rel-file))
+    (goto-char (point-min))
+    (let ((line)
+          (commit)
+          (time)
+          (subject) (new-subject)
+          (author)  (new-author)
+          (date)    (new-date)
+          (file)    (new-file))
+      (while (not (eobp))
+        (setq line (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position)))
+	(string-match
+         "\\([^\0]*\\)\0\\([^\0]*\\)\0\\([^\0]*\\)\0\\([^\0]*\\)" line)
+        (setq commit (match-string 1 line))
+        (setq new-subject (match-string 3 line))
+        (setq new-author (match-string 4 line))
+        (setq new-date (match-string 2 line))
+        (unless (equal subject new-subject)
+          (setq subject new-subject))
+        (unless (equal author new-author)
+          (setq author new-author))
+        (unless (equal date new-date)
+          (setq date new-date)
+          (setq time (date-to-time date)))
+        (forward-line 1)
+	(setq new-file (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position)))
+        (unless (equal file new-file)
+          (setq file new-file))
+	(push (list commit time subject author file) revision-infos)
+        (forward-line 2))
+      revision-infos)))
+
+(defun vc-git-tm-map-line-no (file from-commit from-line
+                                   to-commit from-is-older)
+  "Return TO-COMMIT's line number corresponding to FROM-COMMIT's FROM-LINE.
+On entry the current-buffer is an empty temporary buffer.
+
+Elsewhere the formals FROM-COMMIT and TO-COMMIT are named FROM-REVISION
+and TO-REVISION.  This change of name is to clarify the git meaning."
+  (let ((line (format "-L %s,%s" from-line from-line))
+        (reverse-flag (if from-is-older "--reverse" ""))
+        (range (if from-is-older
+                   (format "%s..%s" to-commit from-commit)
+                 (format "%s..%s" from-commit to-commit)))
+        (to-line))
+    (vc-git--process-file "blame" reverse-flag "-n" line file range)
+    (goto-char (point-min))
+    ;; For an end-of-buffer problem try flipping the blame around.
+    (when (search-forward-regexp "^fatal: file .+ has only .+ lines" nil t)
+      (erase-buffer)
+      (setq from-line (1- from-line))
+      (setq line (format "-L %s,%s" from-line from-line))
+      (vc-git--process-file "blame" reverse-flag "-n" line file range))
+    (goto-char (point-min))
+    (search-forward-regexp "^[^ ]+ \\([^ ]+\\)")
+    (setq to-line (string-to-number (match-string 1)))
+    ;; Just reuse from-line if git blame fails to give us what we expect.
+    (when (= to-line 0)
+      (setq to-line from-line))
+    to-line))
 
 ;;; MISCELLANEOUS
 

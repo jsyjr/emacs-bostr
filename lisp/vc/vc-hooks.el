@@ -30,7 +30,8 @@
 
 ;;; Code:
 
-(eval-when-compile (require 'cl-lib))
+(eval-when-compile
+  (require 'cl-lib))
 
 ;; Faces
 
@@ -897,6 +898,8 @@ In the latter case, VC mode is deactivated for this buffer."
 
 (add-hook 'kill-buffer-hook #'vc-kill-buffer-hook)
 
+(declare-function vc-tm-revision-head "vc-timemachine" (&optional bos))
+
 ;; Now arrange for (autoloaded) bindings of the main package.
 ;; Bindings for this have to go in the global map, as we'll often
 ;; want to call them from random buffers.
@@ -932,7 +935,9 @@ In the latter case, VC mode is deactivated for this buffer."
   "D"   #'vc-root-diff
   "~"   #'vc-revision-other-window
   "x"   #'vc-delete-file
-  "!"   #'vc-edit-next-command)
+  "!"   #'vc-edit-next-command
+  ","   #'vc-tm-revision-head)
+
 (fset 'vc-prefix-map vc-prefix-map)
 (define-key ctl-x-map "v" 'vc-prefix-map)
 
@@ -962,6 +967,9 @@ In the latter case, VC mode is deactivated for this buffer."
     (bindings--define-key map [vc-rename-file]
       '(menu-item "Rename File" vc-rename-file
 		  :help "Rename file"))
+    (bindings--define-key map [vc-tm-revision-head]
+      '(menu-item "Time machine at HEAD" vc-tm-revision-head
+		  :help "Launch a time machine for the HEAD revision"))
     (bindings--define-key map [vc-revision-other-window]
       '(menu-item "Show Other Version" vc-revision-other-window
 		  :help "Visit another version of the current file in another window"))

@@ -31,6 +31,10 @@
 
 ;; You can support the RCS -x option by customizing vc-rcs-master-templates.
 
+;;; Todo:
+;;
+;; * Teach vc-rcs-tm-revisions about RCS branching
+
 ;;; Code:
 
 ;;;
@@ -814,6 +818,56 @@ systime, or nil if there is none.  Also, reposition point."
        dir
        (lambda (f)
 	 (vc-do-command "*vc*" 0 "rcs" (vc-master-name f) (concat "-n" name ":")))))))
+
+
+;;;
+;;; Timemachine
+;;;
+
+;; This implementation does not handle RCS branches.
+(defun vc-rcs-tm-revisions (file)
+  "Return data about revisions modifying FILE on checked-out branch."
+  (vc-do-command t 0 "rcs" (concat vc-cache-root file) "log")
+  (vc-rcs-tm-revisions-parse-log file))
+
+;; Convert an RCS log into revisions info per vc-timemachine's expectations.
+(defun vc-rcs-tm-revisions-parse-log (file)
+  "Extract revisions info from contents of current buffer."
+  (goto-char (point-min))
+  (let ((revision-infos)
+        (line)
+        (revision)
+        (time)
+        (subject) (new-subject)
+        (author)  (new-author)
+        (date)    (new-date))
+    (while (search-forward-regexp "^-[-]*\n" nil t)
+      (setq line (concat (buffer-substring-no-properties
+                          (line-beginning-position) (line-end-position)) "\t"))
+      (when (string-match "^revision \\(1[.][0-9]+\\)\t" line)
+        (setq revision (match-string 1 line))
+        (forward-line 1)
+        (setq line (buffer-substring-no-properties
+                    (line-beginning-position) (line-end-position)))
+        (string-match "^date: \\([^;]*\\);  author: \\([^;]*\\);" line)
+	(setq new-author (match-string 2 line))
+        (unless (equal author new-author)
+          (setq author new-author))
+        (setq new-date (match-string 1 line))
+        (unless (equal date new-date)
+          (setq date new-date)
+          (setq time (date-to-time date)))
+        (forward-line 1)
+        (when (looking-at-p "branches: .*;")
+          (forward-line 1))
+        (setq new-subject (buffer-substring-no-properties
+                           (line-beginning-position) (line-end-position)))
+        (when (equal new-subject "*** empty log message ***")
+          (setq new-subject ""))
+        (unless (equal subject new-subject)
+          (setq subject new-subject))
+	(push (list revision time subject author file) revision-infos)))
+    revision-infos))
 
 
 ;;;

@@ -460,6 +460,44 @@
 ;;   Return the most recent revision of FILE that made a change
 ;;   on LINE.
 
+;; TIMEMACHINE
+;;
+;; To support TM a backend must implement:
+;;
+;; - tm-revisions (file &optional branch)
+;;
+;;   Return a list of revision-infos corresponding to the revisions modifying
+;;   FILE on BRANCH within THE VCS'S root-dir.  When BRANCH is present it
+;;   will match that of working FILE.
+;;
+;;   A revision-info is a list (REVISION-ID DATE SUBJECT AUTHOR REL-FILE):
+;;
+;;   - REVISION-ID:  the VCS's unique identification of a revision
+;;   - DATE:         revision creation date formatted by vc-tm-format-date
+;;   - SUBJECT:      first line of message supplied at revision's creation
+;;   - AUTHOR:       some indication of the revision's author
+;;   - REL-FILE:     VCS root-relative path to file
+;;
+;;   The head of the list should describe the oldest revision.  The tail of
+;;   the list should describe the newest revision.
+;;
+;; - tm-map-line-no (file from-revision from-line to-revision from-is-older)
+;;
+;;   Return a TO-REVISION line number corresponding to FROM-REVISION's
+;;   FROM-LINE.  FROM-REVISION and TO-REVISION are guaranteed distinct.
+;;   FROM-IS-OLDER indicates relative temporal ordering of FROM-REVISION
+;;   and TO-REVISION on the branch.
+;;
+;;   On entry default-directory is the VCS's abs-root, REL-FILE is the path
+;;   relative to the file being displayed and the current-buffer is an empty
+;;   temporary buffer.
+;;
+;;   VC supplies a trivial vc-default-tm-map-line-no.  It returns FROM-LINE,
+;;   effectively asserting that the corresponding line in the TO-REVISION
+;;   occurs at exactly the same line number.  vc-git.el's implementation
+;;   is complete and reasonably understandable.  (Unfortunately, it uses
+;;   many unique features of git blame that may not exist in other VCSs.)
+
 ;; TAG/BRANCH SYSTEM
 ;;
 ;; - create-tag (dir name branchp)
@@ -1291,10 +1329,11 @@ BEWARE: this function may change the current buffer."
 		;; current buffer are the same buffer.
  		(not (eq vc-parent-buffer (current-buffer))))
       (set-buffer vc-parent-buffer))))
-  (if (not buffer-file-name)
-      (error "Buffer %s is not associated with a file" (buffer-name))
-    (unless (vc-backend buffer-file-name)
-      (error "File %s is not under version control" buffer-file-name))))
+  (cond
+   ((not buffer-file-name)
+    (error "Buffer '%s' is not associated with a file" (buffer-name)))
+   ((unless (vc-backend buffer-file-name)
+      (error "File '%s' is not under version control" buffer-file-name)))))
 
 ;;; Support for the C-x v v command.
 ;; This is where all the single-file-oriented code from before the fileset
