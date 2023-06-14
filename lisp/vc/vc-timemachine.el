@@ -261,10 +261,10 @@ VCS and show vc-bos backup-on-save revisions."
       (setq cursor-win-pos (vc-tm--get-cursor-win-position)))
     (cond
      ((< to-index 0)
-      (error "There is no negative branch index %d; most recent is HEAD revision 0"
+      (error "Revisions indices are never negative (%d); newest revision has index 0"
              to-index))
      ((> to-index branch-length)
-      (error "There is no branch index %d; oldest is %d)"
+      (error "Revision index %d is too large; oldest available revision has index %d)"
              to-index branch-length))
      (t
       (let* ((new-revision-info (vc-tm--tmbuf-revision-info to-index))
